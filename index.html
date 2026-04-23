@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Local Face Test Recreation</title>
+    <meta
+      name="description"
+      content="A local recreation of the UNSW Face Test flow with study, memory, matching, and CSV export."
+    >
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark">FT</div>
+          <div>
+            <p class="eyebrow">Local Recreation</p>
+            <h1>Face Test</h1>
+          </div>
+        </div>
+        <p class="topbar-note">Built from the public UNSW Face Test flow for local use.</p>
+      </header>
+
+      <main id="app" class="app" aria-live="polite"></main>
+    </div>
+
+    <noscript>
+      <div class="noscript">
+        JavaScript is required to run this app.
+      </div>
+    </noscript>
+
+    <script src="./data/face-test-data.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
