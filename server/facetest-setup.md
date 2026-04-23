@@ -23,7 +23,7 @@ Example directories:
 These are the important server-side variables for the face test:
 
 - `FACETEST_API_PORT`
-  Node/Express listen port, e.g. `3001`
+  Node/Express listen port, e.g. `4311`
 - `FACETEST_DB_PATH`
   SQLite database path
 - `FACETEST_ASSET_DIR`
@@ -60,8 +60,8 @@ Example site block:
 
 ```caddy
 unsw-face.cogbook.org {
-    handle /api/* {
-        reverse_proxy localhost:3001
+        handle /api/* {
+        reverse_proxy localhost:4311
     }
 
     handle {

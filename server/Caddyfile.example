@@ -2,7 +2,7 @@ unsw-face.cogbook.org {
     encode zstd gzip
 
     handle /api/* {
-        reverse_proxy 127.0.0.1:3001
+        reverse_proxy 127.0.0.1:4311
     }
 
     handle {

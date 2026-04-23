@@ -42,8 +42,8 @@ npm start
 
 The Express app serves both the static frontend and the API, so for local use you can open:
 
-- `http://localhost:3001/index.html`
-- `http://localhost:3001/admin.html`
+- `http://localhost:4311/index.html`
+- `http://localhost:4311/admin.html`
 
 ## Researcher Setup Flow
 
