@@ -9,6 +9,12 @@ Desktop.ini
 
 # Local exports
 *.csv
+.env
+node_modules/
+data/assets/
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
 
 # Logs
 *.log

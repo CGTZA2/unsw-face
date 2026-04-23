@@ -39,7 +39,8 @@ img {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -294,13 +295,19 @@ select {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 14px;
   background: rgba(7, 17, 26, 0.95);
   color: var(--text);
+}
+
+.field textarea {
+  resize: vertical;
+  min-height: 120px;
 }
 
 .field-full {
@@ -495,6 +502,30 @@ select {
 .noscript {
   color: var(--muted);
   text-align: center;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 12px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
+.admin-table th {
+  color: var(--teal);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .noscript {

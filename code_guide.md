@@ -1,147 +1,145 @@
 # Code Guide
 
-This guide is for the next agent taking over work on the local face-test recreation.
+This guide is for the next engineer or agent taking over the standalone `unsw-face` implementation.
 
-## Purpose
+## Current Architecture
 
-This app recreates the public UNSW Face Test flow as a self-contained local web app.
+The app is split into:
 
-It keeps these major behaviors:
+- participant frontend in `index.html` + `app.js`
+- admin frontend in `admin.html` + `admin.js`
+- backend routes in `api/facetest.js`
+- schema bootstrap in `api/db.js`
+- standalone Express entrypoint in `api/app.js`
+- standalone process entrypoint in `api/server.js`
 
-- Consent and demographics intake
-- Study phase with 20 timed faces
-- Memory recognition phase with 40 trials
-- Matching phase with 2 practice trials and 20 scored trials
-- Final score summary
-- Local CSV download instead of the original server-side save
+The old `window.FACE_TEST_DATA` runtime model is no longer the primary path. The participant app now starts by calling the backend, which creates a run tied to a published study version and returns a frozen resolved stimulus set for that participant.
 
-It does not depend on the original UNSW backend once the files are present locally.
+## Key Model
 
-## Main Folders
+The central server-side model is:
 
-- [index.html](C:/Users/00298204/Dropbox/teaching/psychology_2/Psy2015f/r4psy2026/facetest-clone/index.html:1)
-  Entry point for the app.
-- [app.css](C:/Users/00298204/Dropbox/teaching/psychology_2/Psy2015f/r4psy2026/facetest-clone/app.css:1)
-  All app styling.
-- [app.js](C:/Users/00298204/Dropbox/teaching/psychology_2/Psy2015f/r4psy2026/facetest-clone/app.js:1)
-  Main runtime, state, screen rendering, timing, scoring, and CSV export.
-- [data/face-test-data.js](C:/Users/00298204/Dropbox/teaching/psychology_2/Psy2015f/r4psy2026/facetest-clone/data/face-test-data.js:1)
-  Generated dataset injected as `window.FACE_TEST_DATA`.
-- `assets/`
-  Downloaded images used by the study, memory, practice, and matching phases.
+- `facetest_studies`
+- `facetest_study_versions`
+- `facetest_form_defs`
+- `facetest_populations`
+- `facetest_assets`
+- `facetest_selection_rules`
+- `facetest_runs`
+- `facetest_run_forms`
+- `facetest_run_events`
+- `facetest_memory_trials`
+- `facetest_matching_trials`
+- `facetest_raw_rows`
+- `facetest_admin_audit`
 
-## Source Of Truth
+Important runtime rule:
 
-The current app is driven by `window.FACE_TEST_DATA`.
+- published versions are immutable
+- participant runs always resolve against a published version snapshot
+- runs store both normalized trial data and raw row/event archives
 
-That object includes:
+## Backend Responsibilities
 
-- `settings`
-- `studyFaces`
-- `memoryTrials`
-- `practiceTrials`
-- `matchingTrials`
-- `percentileBenchmarks`
+`api/facetest.js` handles three major areas:
 
-The runtime assumes this structure exists before `app.js` runs.
+1. Admin CRUD and publishing
+2. Participant run lifecycle
+3. Reporting and CSV export
 
-## How The Data Was Built
+Notable backend behaviors:
 
-The local data bundle and assets were generated from the saved public UNSW page source using:
+- admin auth uses the standalone `x-facetest-admin-token` header
+- uploaded assets are written to the filesystem under `FACETEST_ASSET_DIR` or `data/assets`
+- matching trials are grouped via `trial_set_id`
+- study and memory-old linkage depends on shared `identity_id`
+- publish validation checks that a version is complete and that sampling rules can be satisfied
 
-- [scripts/facetest_clone_builder.py](C:/Users/00298204/Dropbox/teaching/psychology_2/Psy2015f/r4psy2026/scripts/facetest_clone_builder.py:1)
+## Frontend Responsibilities
 
-That builder:
+### Participant app
 
-- Parses `.tmp-facetest/UNSWfacetestlink.html`
-- Extracts the matching trial order and answer keys
-- Generates `data/face-test-data.js`
-- Downloads required assets into `facetest-clone/assets`
+`app.js` now:
 
-If trials or assets need regeneration, rerun:
+- loads available public studies
+- starts a run on the server
+- renders consent, configurable pages, demographics, contact, and all task phases
+- posts forms, events, memory trials, matching trials, and completion data back to the API
 
-```powershell
-py scripts/facetest_clone_builder.py
-```
+The participant app assumes:
 
-After updating the source copy under the repo, copy the folder to:
+- study faces are in `resolvedStimuli.studyFaces`
+- memory trials are in `resolvedStimuli.memoryTrials`
+- practice and scored matching trials contain target/stimuli/answers
 
-- `C:\Users\00298204\Downloads\facetest-clone`
+### Admin app
 
-## Runtime Structure
+`admin.js` is a practical research control panel, not a full design system app.
 
-The app is a lightweight single-page flow with manual rendering.
+It supports:
 
-Important `app.js` areas:
+- creating/opening studies
+- creating/cloning versions
+- saving page/form/settings config
+- creating populations
+- uploading assets
+- saving selection rules
+- publishing versions
+- loading runs and downloading CSV exports
 
-- `state`
-  Holds session IDs, demographics, contact email, randomized trial orders, and event records.
-- `main()`
-  Defines the whole test flow in sequence.
-- `renderBaseScreen()`
-  Shared layout renderer for consent, demographics, instructions, and contact screens.
-- `runStudyPhase()`
-  Timed exposure of study faces.
-- `runMemoryPhase()` and `showMemoryTrial()`
-  Recognition test and scoring.
-- `runMatchingBlock()`, `showMatchingPreview()`, and `showMatchingSorter()`
-  Matching preview, drag/drop sorting UI, and point assignment.
-- `computeScores()`
-  Final summary scoring.
-- `buildCsv()` and `downloadCsv()`
-  Local export path that replaces the original `save_data.php` behavior.
+## Asset Conventions
 
-## Scoring Rules
+The current implementation relies on these asset roles:
 
-The recreated scoring follows the public page logic:
+- `study`
+- `memory_old`
+- `memory_new`
+- `practice_target`
+- `practice_probe`
+- `matching_target`
+- `matching_probe`
 
-- Memory section: 40 total points
-- Matching section: 80 total points
-- Overall score: `round((memory + matching) / 120 * 100)`
+Conventions that matter:
 
-Practice matching trials are recorded but excluded from the final matching score.
+- `study` and `memory_old` assets should share an `identity_id`
+- each matching/practice set needs one target plus at least four probes sharing the same `trial_set_id`
+- probe assets require `expected_side` of `left` or `right`
 
-## Key Differences From The Public Site
+## Selection Rules
 
-- No `jsPsych`
-  The original page uses older `jsPsych` plugins. This recreation is plain HTML/CSS/JS.
-- No backend post
-  The original sends CSV to `save_data.php`. This version stores data in memory and offers CSV download.
-- No redirect to the public finish page
-  Results are shown locally inside the app.
-- UI is modernized
-  The flow is still faithful, but the presentation is newer and easier to maintain.
+Selection rules are stored per version and phase.
 
-## Things To Be Careful About
+Supported phases:
 
-- `requestFullscreenSafe()` is best-effort only. It may fail silently depending on browser policy.
-- The matching UI supports both drag/drop and button-based classification. If you change card markup, make sure both paths still work.
-- `showMatchingSorter()` assumes exactly 4 stimuli per matching trial.
-- `buildCsv()` uses event-style rows plus one summary row. If another system consumes this CSV, preserve the current headers or coordinate the schema change.
-- `assetPath()` assumes the app is served from the `facetest-clone` root.
+- `study`
+- `memory_old`
+- `memory_new`
+- `practice_matching`
+- `matching`
 
-## Known Gaps
+Current v1 behavior:
 
-- I did not run a full automated browser smoke test in this environment.
-- I did not reproduce the exact old consent page HTML; the current consent screen is a local-use summary that keeps the same checkpoint in the flow.
-- The public site’s social/share/finish pages were not rebuilt because the task focus was the test app itself.
-- The app works best opened from a desktop browser; mobile remains a weak target just like the original.
+- study rules select unique identities from `study` assets and derive matching `memory_old` assets from those identities
+- memory-new rules draw random nonstudied assets from `memory_new`
+- practice and scored matching rules draw random `trial_set_id` groups
+- balancing is per-run random, not quota-balanced across participants
 
-## Best Next Tasks For A New Agent
+## Important Constraints
 
-- Do a live browser pass through all phases and confirm the timing/flow feels right.
-- Check that drag/drop works in the target browser and that the button fallback is still usable.
-- Validate the CSV contents after one full run.
-- If parity matters, compare wording and percentile text against the current public site.
-- If deployment is needed, add a tiny local server recommendation or package it for static hosting.
+- The standalone API accepts JSON bodies up to `10mb` to support base64 image uploads. If researchers upload large images, consider moving to multipart upload or client-side resizing.
+- The admin UI currently stores page arrays via textarea separators and demographics/rule/settings config as JSON textareas. This is functional, but not yet polished.
+- The participant app assumes a 40-point memory section and 80-point scored matching section when computing results, matching the original recreation.
+- The browser code auto-derives `/api/facetest` and can also be overridden with a `<meta name="facetest-api-base">`.
 
-## File Placement
+## Recommended Next Improvements
 
-There are currently two copies of this app:
+- Replace base64 JSON uploads with multipart upload for larger files.
+- Add richer admin editing for page blocks and form fields.
+- Add deletion/editing UI for existing populations/assets/rules.
+- Add per-run detail view links in the admin UI.
+- Add browser-based E2E verification once Node/browser tooling is available in the environment.
+- Add migration/bootstrap tooling if you want to ingest the original legacy asset bundle into the admin-managed schema automatically.
 
-- Source copy in the repo:
-  `C:\Users\00298204\Dropbox\teaching\psychology_2\Psy2015f\r4psy2026\facetest-clone`
-- Delivered copy in Downloads:
-  `C:\Users\00298204\Downloads\facetest-clone`
+## Verification Caveat
 
-If you change the repo copy, remember to copy the updated folder into `Downloads` again if that delivered copy is the one being used.
+I was not able to run the Node test suite in this environment because no `node` binary was available on the PATH. The standalone backend tests are in `api/test/facetest.test.js`, but they still need to be executed in a machine or CI environment with Node available.

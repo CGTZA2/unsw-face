@@ -1,0 +1,13 @@
+unsw-face.cogbook.org {
+    encode zstd gzip
+
+    handle /api/* {
+        reverse_proxy 127.0.0.1:3001
+    }
+
+    handle {
+        root * /opt/unsw-face
+        try_files {path} {path}.html {path}/
+        file_server
+    }
+}

@@ -1,172 +1,112 @@
 const app = document.getElementById("app");
-const data = window.FACE_TEST_DATA;
+const API_BASE = resolveApiBase();
+const BROWSER_ID_KEY = "facetest-browser-id";
 
 const state = {
-  subjectId: Math.floor(Math.random() * 100000000),
-  subjectId2: Math.floor(Math.random() * 100000000),
-  sessionStartedAt: new Date().toISOString(),
-  demographics: {
-    age: "",
-    ageBracket: "",
-    gender: "",
-    ethnicity: "",
-  },
-  contactEmail: "",
-  records: [],
-  studyOrder: shuffle([...data.studyFaces]),
-  memoryOrder: shuffle([...data.memoryTrials]),
+  browserId: getOrCreateBrowserId(),
+  studies: [],
+  runId: null,
+  study: null,
+  version: null,
+  pages: {},
+  demographicsSchema: [],
+  contactSchema: [],
+  settings: {},
+  resolvedStimuli: null,
+  demographics: {},
+  contact: {},
   memoryResults: [],
   matchingResults: [],
 };
 
-const ageChoices = [
-  "Under 18",
-  "18-24",
-  "25-34",
-  "35-44",
-  "45-54",
-  "55-64",
-  "65-74",
-  "75-84",
-  "85 or older",
-];
-
-const genderChoices = [
-  "Male",
-  "Female",
-  "Non-binary",
-  "My gender is not listed here",
-  "I prefer not to say",
-];
-
-const ethnicityChoices = [
-  "Aboriginal or Torres Strait Islander",
-  "African",
-  "European or other Caucasian",
-  "East Asian e.g. Chinese, Hong Konger",
-  "South Asian e.g. Indian, Bangladeshi",
-  "Southeast Asian e.g. Thai, Vietnamese",
-  "Middle Eastern",
-  "Hispanic",
-  "Pacific Islander",
-  "Mixed",
-  "Other",
-];
-
-const disclaimerPages = [
-  `
-    <p><strong>Disclaimer</strong></p>
-    <p>
-      This local recreation mirrors the public UNSW Face Test flow, but it saves your results as a
-      CSV file on this computer instead of posting them to the original website.
-    </p>
-    <p>
-      The original site warns that some recruitment agencies have asked people to complete the test
-      and share their scores. The UNSW notice states that those agencies are not affiliated with
-      UNSW or with an authorised research team.
-    </p>
-  `,
-];
-
-const studyInstructionPages = [
-  `
-    <p><strong>Memory Learning Phase Instructions</strong></p>
-    <p>There are three parts to this face test. You will now begin Part 1, the Memory Learning Phase.</p>
-  `,
-  `
-    <p>You will be shown 20 faces, one after another.</p>
-    <p>Try to memorise these faces because you will be tested on them in the next part.</p>
-    <p>Faces appear automatically, so you do not need to press any keys during Part 1.</p>
-  `,
-  `
-    <p class="mobile-warning">
-      This task works best on a desktop or laptop computer. The original UNSW test is not designed
-      for mobile use, and this recreation keeps the same assumption.
-    </p>
-  `,
-];
-
-const memoryInstructionPages = [
-  `
-    <p><strong>Memory Test Instructions</strong></p>
-    <p>For each face, decide whether that person appeared during the learning phase.</p>
-  `,
-  `
-    <p>
-      This recognition test is intentionally difficult because the appearance of faces may change
-      due to age, lighting, pose, expression, or head angle.
-    </p>
-  `,
-  `
-    <p>If you studied the face earlier, respond <strong>Y</strong> for Yes.</p>
-    <p>If you did not study the face earlier, respond <strong>N</strong> for No.</p>
-  `,
-  `
-    <p>
-      When a studied identity reappears, it uses a different photo of the same person. Those
-      trials should still be answered with <strong>Yes</strong>.
-    </p>
-  `,
-];
-
-const matchingInstructionPages = [
-  `
-    <p><strong>Sorting Instructions</strong></p>
-    <p>In this block you will be tested on your ability to find images that match a target face.</p>
-  `,
-  `
-    <p>
-      On each trial you will first see a target face. After the target disappears, classify a set
-      of four images according to whether they match that target or not.
-    </p>
-    <p>Any number of the four images may match the target, including zero or all four.</p>
-  `,
-  `
-    <p>Move matching faces to the <strong>right</strong> side and nonmatching faces to the <strong>left</strong> side.</p>
-    <p>You can drag cards between columns or use each card’s quick-classify buttons.</p>
-    <img src="./assets/example/exampleScreen.jpg" alt="Example of the matching screen">
-  `,
-  `
-    <p>We will start with two practice trials.</p>
-    <p>
-      Respond as quickly and accurately as you can. You may take your time, but this task relies on
-      face information held in memory, so overthinking is not always helpful.
-    </p>
-  `,
-];
-
 main().catch(renderFatalError);
 
 async function main() {
-  await showLanding();
+  state.studies = await fetchJson(`${API_BASE}/public/studies`).then((body) => body.studies || []);
+  if (!state.studies.length) {
+    renderUnavailable();
+    return;
+  }
+
+  const selectedStudy = await showLanding();
+  const run = await startRun(selectedStudy.slug);
+
+  state.runId = run.runId;
+  state.study = run.study;
+  state.version = run.version;
+  state.pages = run.pages || {};
+  state.demographicsSchema = run.demographicsSchema || [];
+  state.contactSchema = run.contactSchema || [];
+  state.settings = run.settings || {};
+  state.resolvedStimuli = run.resolvedStimuli;
+
   await showConsent();
-  await collectDemographics();
-  await showInstructionSet("Important Note", disclaimerPages, "Continue");
-  await showInstructionSet("Part 1", studyInstructionPages, "Begin Memory Learning");
+  await maybeShowPages("Disclaimer", state.pages.disclaimer, "Continue", "disclaimer");
+  await maybeShowPages("Part 1", state.pages.studyInstructions, "Begin Memory Learning", "study-instructions");
   await requestFullscreenSafe();
   await runStudyPhase();
-  await showInstructionSet("Part 2", memoryInstructionPages, "Begin Memory Test");
+  await maybeShowPages("Part 2", state.pages.memoryInstructions, "Begin Memory Test", "memory-instructions");
   await runMemoryPhase();
-  await showInstructionSet("Part 3", matchingInstructionPages, "Begin Practice");
-  await runMatchingBlock(data.practiceTrials, true);
-  await showInstructionSet(
-    "Practice Complete",
-    ["<p><strong>End of practice trials.</strong></p><p>Click below to begin the scored matching trials.</p>"],
-    "Begin Real Trials",
-  );
-  await runMatchingBlock(data.matchingTrials, false);
+  await maybeShowPages("Part 3", state.pages.matchingInstructions, "Begin Practice", "matching-instructions");
+  await runMatchingBlock(state.resolvedStimuli.practiceTrials || [], true);
+  await maybeShowPages("Practice Complete", state.pages.practiceComplete, "Begin Real Trials", "practice-complete");
+  await runMatchingBlock(state.resolvedStimuli.matchingTrials || [], false);
   await collectContact();
-  await showInstructionSet("Final Note", disclaimerPages, "See Results");
+  await maybeShowPages("Final Note", state.pages.finalNote, "See Results", "final-note");
+  await completeRun();
   renderResults();
 }
 
-function renderBaseScreen({ step, title, subtitle, sideHtml, bodyHtml, actions }) {
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    let errorText = `${response.status} ${response.statusText}`;
+    try {
+      const payload = await response.json();
+      errorText = payload.error || payload.validationErrors?.join("\n") || errorText;
+    } catch {}
+    throw new Error(errorText);
+  }
+
+  if (response.status === 204) {
+    return {};
+  }
+
+  return response.json();
+}
+
+function getOrCreateBrowserId() {
+  const existing = localStorage.getItem(BROWSER_ID_KEY);
+  if (existing) return existing;
+  const created = (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`).toString();
+  localStorage.setItem(BROWSER_ID_KEY, created);
+  return created;
+}
+
+function resolveApiBase() {
+  const configured = document.querySelector('meta[name="facetest-api-base"]')?.content;
+  if (configured) {
+    return configured.replace(/\/+$/, "");
+  }
+  const here = new URL(window.location.href);
+  const isNestedSubdir = /\/facetest-clone\/(?:index\.html)?$/i.test(here.pathname);
+  return isNestedSubdir
+    ? new URL("../api/facetest", here).pathname.replace(/\/+$/, "")
+    : new URL("api/facetest", here).pathname.replace(/\/+$/, "");
+}
+
+function renderBaseScreen({ step, title, subtitle = "", sideHtml = "", bodyHtml = "", actions = [] }) {
   const actionMarkup = actions
     .map(
       (action) =>
-        `<button id="${action.id}" class="button ${action.className || "button-primary"}" ${
-          action.disabled ? "disabled" : ""
-        }>${action.label}</button>`,
+        `<button id="${action.id}" class="button ${action.className || "button-primary"}" ${action.disabled ? "disabled" : ""}>${action.label}</button>`,
     )
     .join("");
 
@@ -192,219 +132,343 @@ function sessionInfoHtml(extraHtml = "") {
   return `
     <div class="body-stack">
       <div class="mini-panel">
-        <strong>Session IDs</strong>
-        <div class="pill-row">
-          <span class="pill-neutral">${state.subjectId}</span>
-          <span class="pill-neutral">${state.subjectId2}</span>
-        </div>
+        <strong>Study</strong>
+        <p class="panel-copy">${escapeHtml(state.study?.title || "Not started")}</p>
       </div>
       <div class="mini-panel">
-        <strong>Task Structure</strong>
-        <p class="panel-copy">20 study faces, 40 memory trials, 20 matching trials, and local CSV export.</p>
+        <strong>Run</strong>
+        <p class="panel-copy">${state.runId ? escapeHtml(state.runId) : "Pending"}</p>
+      </div>
+      <div class="mini-panel">
+        <strong>Browser</strong>
+        <p class="panel-copy">${escapeHtml(state.browserId)}</p>
       </div>
       ${extraHtml}
     </div>
   `;
 }
 
-async function showLanding() {
+function renderUnavailable() {
   app.innerHTML = `
     <section class="screen">
       <article class="panel hero">
         <div class="hero-copy">
-          <p class="eyebrow">Public-Test Recreation</p>
-          <h2>Local Face Test App</h2>
+          <p class="eyebrow">Face Test</p>
+          <h2>No Published Study Available</h2>
           <p>
-            This is a local recreation of the public UNSW Face Test flow. It keeps the original
-            three-part structure: study faces, recognise previously seen identities, and classify
-            matches after a brief target preview.
+            The participant app is now server-backed. A researcher needs to create and publish a
+            study version in the admin area before the test can start.
           </p>
           <div class="hero-actions">
-            <button id="start-app" class="button button-primary">Start Test</button>
-            <button id="learn-more" class="button button-secondary">What Changed?</button>
-          </div>
-        </div>
-        <div class="hero-aside">
-          <div class="notice-card">
-            <strong>Desktop Recommended</strong>
-            <p class="panel-copy">
-              The original test is not mobile compatible. This recreation works best on a larger
-              screen with a mouse or trackpad.
-            </p>
-          </div>
-          <div class="notice-card">
-            <strong>Local Output</strong>
-            <p class="panel-copy">
-              The original site posts results to a server. This version keeps the flow local and
-              lets you download a CSV at the end.
-            </p>
-          </div>
-          <div class="notice-card">
-            <strong>Scoring</strong>
-            <p class="panel-copy">
-              Memory trials contribute 40 points, matching trials contribute 80 points, and the
-              final percentage is based on 120 total points.
-            </p>
+            <a class="button button-primary" href="./admin.html">Open Admin</a>
           </div>
         </div>
       </article>
     </section>
   `;
+}
 
-  const startButton = document.getElementById("start-app");
-  const learnMoreButton = document.getElementById("learn-more");
+function showLanding() {
+  return new Promise((resolve) => {
+    app.innerHTML = `
+      <section class="screen">
+        <article class="panel hero">
+          <div class="hero-copy">
+            <p class="eyebrow">Server-Backed Study</p>
+            <h2>Face Test Participant Portal</h2>
+            <p>
+              This version loads a published study configuration from the server, records all run
+              data centrally, and uses a frozen random stimulus draw for each participant.
+            </p>
+            <div class="field field-full">
+              <label for="study-select">Select Study</label>
+              <select id="study-select">
+                ${state.studies
+                  .map(
+                    (study) =>
+                      `<option value="${study.slug}">${escapeHtml(study.title)} (v${study.publishedVersion.versionNumber})</option>`,
+                  )
+                  .join("")}
+              </select>
+            </div>
+            <div class="hero-actions">
+              <button id="start-run" class="button button-primary">Start Test</button>
+              <a class="button button-secondary" href="./admin.html">Admin</a>
+            </div>
+          </div>
+          <div class="hero-aside">
+            <div class="notice-card">
+              <strong>Anonymous Access</strong>
+              <p class="panel-copy">
+                This study is configured for anonymous participant access. Your browser receives a
+                generated run ID after the server resolves the stimulus set.
+              </p>
+            </div>
+            <div class="notice-card">
+              <strong>Server Recording</strong>
+              <p class="panel-copy">
+                Consent, forms, events, trials, and final scores are all stored on the server for
+                researcher reporting and export.
+              </p>
+            </div>
+          </div>
+        </article>
+      </section>
+    `;
 
-  await new Promise((resolve) => {
-    startButton.addEventListener("click", resolve, { once: true });
-    learnMoreButton.addEventListener(
-      "click",
-      () => {
-        window.alert(
-          "This local recreation replaces the original server-side save with an on-device CSV export and keeps the public trial flow self-contained in this folder.",
-        );
-      },
-      { once: false },
-    );
+    document.getElementById("start-run").addEventListener("click", () => {
+      const slug = document.getElementById("study-select").value;
+      resolve(state.studies.find((study) => study.slug === slug) || state.studies[0]);
+    });
+  });
+}
+
+async function startRun(studySlug) {
+  return fetchJson(`${API_BASE}/runs/start`, {
+    method: "POST",
+    body: JSON.stringify({
+      study_slug: studySlug,
+      browser_id: state.browserId,
+    }),
   });
 }
 
 async function showConsent() {
-  renderBaseScreen({
-    step: "Consent",
-    title: "Participation And Local Data Handling",
-    subtitle: "The original public test uses a consent screen before starting. This recreation keeps the same checkpoint.",
-    sideHtml: sessionInfoHtml(`
-      <div class="mini-panel">
-        <strong>What You Are Agreeing To</strong>
-        <p class="panel-copy">Continue voluntarily, complete the task locally, and optionally download your own results file.</p>
-      </div>
-    `),
-    bodyHtml: `
-      <div class="consent-box">
-        <p><strong>Summary</strong></p>
-        <p>This task measures face memory and face matching ability using unfamiliar faces.</p>
-        <p>Your participation here is voluntary. You can stop at any point by closing the page.</p>
-        <p>No data are uploaded by this local recreation. Results stay in the browser session until you choose to download them as a CSV file.</p>
-        <p>If you would like the workflow to mimic the public site as closely as possible, please complete the task in one sitting on a desktop or laptop.</p>
-      </div>
-      <label class="check-row">
-        <input id="consent-checkbox" type="checkbox">
-        <span>I have read the local-use summary above and I want to continue.</span>
-      </label>
-    `,
-    actions: [{ id: "continue-consent", label: "Continue To Demographics", className: "button-primary", disabled: true }],
-  });
+  const pages = normalizePages(state.pages.consent, [
+    "<p><strong>Consent</strong></p><p>By continuing, you consent to take part in this face-test study.</p>",
+  ]);
 
-  const checkbox = document.getElementById("consent-checkbox");
-  const button = document.getElementById("continue-consent");
-  checkbox.addEventListener("change", () => {
-    button.disabled = !checkbox.checked;
-  });
-
-  await waitForClick(button);
-
-  record({
-    section: "consent",
-    response: "agreed",
-  });
-}
-
-async function collectDemographics() {
-  renderBaseScreen({
-    step: "Demographics",
-    title: "Participant Questions",
-    subtitle: "These mirror the prompts used before the public test begins.",
-    sideHtml: sessionInfoHtml(`
-      <div class="mini-panel">
-        <strong>Required Fields</strong>
-        <p class="panel-copy">Age bracket, gender, and ethnic background are required to continue. Numeric age remains optional.</p>
-      </div>
-    `),
-    bodyHtml: `
-      <form id="demographic-form" class="fields">
-        <div class="field">
-          <label for="age">Age In Years</label>
-          <input id="age" name="age" type="number" min="0" max="120" placeholder="Optional">
-          <p class="field-help">This mirrors the numeric age prompt shown before the task.</p>
-        </div>
-        <div class="field">
-          <label for="age-bracket">Age Bracket</label>
-          <select id="age-bracket" name="ageBracket" required>
-            <option value="">Select an option</option>
-            ${ageChoices.map((choice) => `<option value="${choice}">${choice}</option>`).join("")}
-          </select>
-        </div>
-        <div class="field">
-          <label for="gender">Gender</label>
-          <select id="gender" name="gender" required>
-            <option value="">Select an option</option>
-            ${genderChoices.map((choice) => `<option value="${choice}">${choice}</option>`).join("")}
-          </select>
-        </div>
-        <div class="field">
-          <label for="ethnicity">Ethnic Background</label>
-          <select id="ethnicity" name="ethnicity" required>
-            <option value="">Select an option</option>
-            ${ethnicityChoices.map((choice) => `<option value="${choice}">${choice}</option>`).join("")}
-          </select>
-        </div>
-      </form>
-    `,
-    actions: [{ id: "save-demographics", label: "Continue", className: "button-primary" }],
-  });
-
-  const form = document.getElementById("demographic-form");
-  const button = document.getElementById("save-demographics");
-
-  await new Promise((resolve) => {
-    button.addEventListener("click", () => {
-      if (!form.reportValidity()) {
-        return;
-      }
-      state.demographics = {
-        age: document.getElementById("age").value.trim(),
-        ageBracket: document.getElementById("age-bracket").value,
-        gender: document.getElementById("gender").value,
-        ethnicity: document.getElementById("ethnicity").value,
-      };
-      record({
-        section: "demographics",
-        ...state.demographics,
-      });
-      resolve();
-    });
-  });
-}
-
-async function showInstructionSet(stepLabel, pages, finalLabel) {
   for (let index = 0; index < pages.length; index += 1) {
     renderBaseScreen({
-      step: stepLabel,
-      title: "Instructions",
+      step: "Consent",
+      title: "Participant Consent",
       subtitle: `Page ${index + 1} of ${pages.length}`,
-      sideHtml: sessionInfoHtml(`
-        <div class="mini-panel">
-          <strong>Reminder</strong>
-          <p class="panel-copy">The local recreation keeps the original three-part sequence and timing.</p>
-        </div>
-      `),
-      bodyHtml: `<div class="copy-box">${pages[index]}</div>`,
+      sideHtml: sessionInfoHtml(),
+      bodyHtml: `
+        <div class="copy-box">${pages[index]}</div>
+        ${
+          index === pages.length - 1
+            ? `<label class="check-row"><input id="consent-checkbox" type="checkbox"><span>I have read the consent information and agree to continue.</span></label>`
+            : ""
+        }
+      `,
       actions: [
         {
-          id: "next-page",
-          label: index === pages.length - 1 ? finalLabel : "Next",
-          className: index === pages.length - 1 ? "button-primary" : "button-secondary",
+          id: "consent-next",
+          label: index === pages.length - 1 ? "Continue" : "Next",
+          className: "button-primary",
+          disabled: index === pages.length - 1,
         },
       ],
     });
 
+    await postEvent("instruction-page-view", "consent", {
+      pageIndex: index + 1,
+      totalPages: pages.length,
+    });
+
+    if (index === pages.length - 1) {
+      const checkbox = document.getElementById("consent-checkbox");
+      const button = document.getElementById("consent-next");
+      checkbox.addEventListener("change", () => {
+        button.disabled = !checkbox.checked;
+      });
+      await waitForClick(button);
+    } else {
+      await waitForClick(document.getElementById("consent-next"));
+    }
+  }
+
+  await submitFormSection("consent", {
+    agreed: true,
+    agreed_at: new Date().toISOString(),
+  });
+}
+
+async function maybeShowPages(step, pages, finalLabel, phaseKey) {
+  const normalized = normalizePages(pages);
+  if (!normalized.length) {
+    return;
+  }
+  for (let index = 0; index < normalized.length; index += 1) {
+    renderBaseScreen({
+      step,
+      title: "Instructions",
+      subtitle: `Page ${index + 1} of ${normalized.length}`,
+      sideHtml: sessionInfoHtml(),
+      bodyHtml: `<div class="copy-box">${normalized[index]}</div>`,
+      actions: [
+        {
+          id: "next-page",
+          label: index === normalized.length - 1 ? finalLabel : "Next",
+          className: index === normalized.length - 1 ? "button-primary" : "button-secondary",
+        },
+      ],
+    });
+
+    await postEvent("instruction-page-view", phaseKey, {
+      pageIndex: index + 1,
+      totalPages: normalized.length,
+    });
     await waitForClick(document.getElementById("next-page"));
   }
 }
 
+async function collectDemographics() {
+  const values = await renderDynamicFormScreen({
+    step: "Demographics",
+    title: "Participant Questions",
+    subtitle: "These questions are configured by the published study version.",
+    fields: state.demographicsSchema,
+    initialValues: state.demographics,
+    submitLabel: "Continue",
+  });
+  state.demographics = values;
+  await submitFormSection("demographics", values);
+}
+
+async function collectContact() {
+  const schema = state.contactSchema.length
+    ? state.contactSchema
+    : [
+        {
+          key: "email",
+          label: "Email Address",
+          type: "email",
+          required: false,
+          help: "Optional. If provided, it is stored separately for researcher contact workflows.",
+        },
+      ];
+  const values = await renderDynamicFormScreen({
+    step: "Contact",
+    title: "Optional Contact Details",
+    subtitle: "The study can store optional contact information separately from the main run data.",
+    fields: schema,
+    initialValues: state.contact,
+    submitLabel: "Continue To Results",
+  });
+  state.contact = values;
+  await submitFormSection("contact", values);
+}
+
+function renderDynamicFormScreen({ step, title, subtitle, fields, initialValues, submitLabel }) {
+  return new Promise((resolve) => {
+    renderBaseScreen({
+      step,
+      title,
+      subtitle,
+      sideHtml: sessionInfoHtml(),
+      bodyHtml: `
+        <form id="dynamic-form" class="fields">
+          ${fields.map((field) => renderField(field, initialValues[field.key] ?? "")).join("")}
+        </form>
+      `,
+      actions: [{ id: "form-submit", label: submitLabel, className: "button-primary" }],
+    });
+
+    const form = document.getElementById("dynamic-form");
+    document.getElementById("form-submit").addEventListener("click", () => {
+      if (!form.reportValidity()) {
+        return;
+      }
+      const values = {};
+      for (const field of fields) {
+        const element = form.querySelector(`[name="${field.key}"]`);
+        if (!element) continue;
+        if (field.type === "checkbox") {
+          values[field.key] = Boolean(element.checked);
+        } else {
+          values[field.key] = element.value;
+        }
+      }
+      resolve(values);
+    });
+  });
+}
+
+function renderField(field, value) {
+  const type = field.type || "text";
+  const required = field.required ? "required" : "";
+  const placeholder = field.placeholder ? `placeholder="${escapeAttribute(field.placeholder)}"` : "";
+  const help = field.help ? `<p class="field-help">${escapeHtml(field.help)}</p>` : "";
+  const label = escapeHtml(field.label || field.key);
+  const key = escapeAttribute(field.key);
+
+  if (type === "textarea") {
+    return `
+      <div class="field field-full">
+        <label for="${key}">${label}</label>
+        <textarea id="${key}" name="${key}" rows="4" ${required} ${placeholder}>${escapeHtml(value)}</textarea>
+        ${help}
+      </div>
+    `;
+  }
+
+  if (type === "select") {
+    const options = normalizeOptions(field.options || []);
+    return `
+      <div class="field">
+        <label for="${key}">${label}</label>
+        <select id="${key}" name="${key}" ${required}>
+          <option value="">Select an option</option>
+          ${options
+            .map(
+              (option) =>
+                `<option value="${escapeAttribute(option.value)}" ${String(value) === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`,
+            )
+            .join("")}
+        </select>
+        ${help}
+      </div>
+    `;
+  }
+
+  if (type === "checkbox") {
+    return `
+      <div class="field field-full">
+        <label class="check-row">
+          <input id="${key}" name="${key}" type="checkbox" ${value ? "checked" : ""}>
+          <span>${label}</span>
+        </label>
+        ${help}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="field">
+      <label for="${key}">${label}</label>
+      <input id="${key}" name="${key}" type="${escapeAttribute(type)}" value="${escapeAttribute(value)}" ${required} ${placeholder}>
+      ${help}
+    </div>
+  `;
+}
+
+function normalizeOptions(options) {
+  return options.map((option) =>
+    typeof option === "string"
+      ? { value: option, label: option }
+      : { value: String(option.value), label: option.label ?? String(option.value) },
+  );
+}
+
+function normalizePages(pages, fallback = []) {
+  if (Array.isArray(pages) && pages.length) {
+    return pages;
+  }
+  if (typeof pages === "string" && pages.trim()) {
+    return [pages];
+  }
+  return fallback;
+}
+
 async function runStudyPhase() {
-  for (let index = 0; index < state.studyOrder.length; index += 1) {
-    const stimulus = state.studyOrder[index];
+  await collectDemographics();
+  const studyFaces = state.resolvedStimuli.studyFaces || [];
+  const viewingTimeMs = Number(state.settings.viewingTimeMs || 5000);
+
+  for (let index = 0; index < studyFaces.length; index += 1) {
+    const face = studyFaces[index];
     app.innerHTML = `
       <section class="screen">
         <article class="panel trial-shell">
@@ -414,44 +478,47 @@ async function runStudyPhase() {
               <h2 class="panel-title">Remember This Person</h2>
             </div>
             <div class="pill-row">
-              <span class="pill-neutral">Study Face ${index + 1} of ${state.studyOrder.length}</span>
-              <span class="pill-neutral">5 seconds</span>
+              <span class="pill-neutral">Study Face ${index + 1} of ${studyFaces.length}</span>
+              <span class="pill-neutral">${Math.round(viewingTimeMs / 1000)} seconds</span>
             </div>
           </div>
           <div class="progress-bar"><span id="study-progress"></span></div>
           <div class="stimulus-frame">
-            <img src="${assetPath(stimulus)}" alt="Study face ${index + 1}">
+            <img src="${face.url}" alt="Study face ${index + 1}">
           </div>
           <p class="trial-note">Faces advance automatically during the learning phase.</p>
         </article>
       </section>
     `;
 
-    record({
-      section: "study",
+    await postEvent("study-exposure", "study", {
       trialIndex: index + 1,
-      stimulus,
-      viewedMs: data.settings.viewingTimeMs,
-    });
-
-    await animateProgress(document.getElementById("study-progress"), data.settings.viewingTimeMs);
+      assetId: face.assetId,
+      stimulusUrl: face.url,
+      viewedMs: viewingTimeMs,
+    }, index + 1);
+    await animateProgress(document.getElementById("study-progress"), viewingTimeMs);
   }
 }
 
 async function runMemoryPhase() {
-  for (let index = 0; index < state.memoryOrder.length; index += 1) {
-    const trial = state.memoryOrder[index];
-    const result = await showMemoryTrial(trial, index + 1, state.memoryOrder.length);
+  const trials = state.resolvedStimuli.memoryTrials || [];
+  for (let index = 0; index < trials.length; index += 1) {
+    const trial = trials[index];
+    const result = await showMemoryTrial(trial, index + 1, trials.length);
     state.memoryResults.push(result);
-    record({
-      section: "memory",
-      trialIndex: index + 1,
-      stimulus: trial.stimulus,
-      trialType: trial.trialType,
-      response: result.response,
-      rtMs: result.rtMs,
-      correct: result.correct,
-      points: result.points,
+    await fetchJson(`${API_BASE}/runs/${state.runId}/memory-trials`, {
+      method: "POST",
+      body: JSON.stringify({
+        trial_index: index + 1,
+        asset_id: trial.assetId || null,
+        stimulus_url: trial.url,
+        trial_type: trial.trialType,
+        response: result.response,
+        rt_ms: result.rtMs,
+        correct: result.correct,
+        points: result.points,
+      }),
     });
   }
 }
@@ -472,7 +539,7 @@ function showMemoryTrial(trial, trialNumber, totalTrials) {
             </div>
           </div>
           <div class="stimulus-frame">
-            <img src="${assetPath(trial.stimulus)}" alt="Memory trial face ${trialNumber}">
+            <img src="${trial.url}" alt="Memory trial face ${trialNumber}">
           </div>
           <div class="response-grid">
             <button id="memory-yes" class="button button-primary response-button">
@@ -488,13 +555,10 @@ function showMemoryTrial(trial, trialNumber, totalTrials) {
       </section>
     `;
 
-    const start = performance.now();
-    const yesButton = document.getElementById("memory-yes");
-    const noButton = document.getElementById("memory-no");
-
+    const started = performance.now();
     const finish = (response) => {
       window.removeEventListener("keydown", handleKeydown);
-      const rtMs = Math.round(performance.now() - start);
+      const rtMs = Math.round(performance.now() - started);
       const correct =
         (trial.trialType === "OLD" && response === "Y") ||
         (trial.trialType === "NEW" && response === "N");
@@ -508,15 +572,12 @@ function showMemoryTrial(trial, trialNumber, totalTrials) {
 
     const handleKeydown = (event) => {
       const key = event.key.toLowerCase();
-      if (key === "y") {
-        finish("Y");
-      } else if (key === "n") {
-        finish("N");
-      }
+      if (key === "y") finish("Y");
+      if (key === "n") finish("N");
     };
 
-    yesButton.addEventListener("click", () => finish("Y"), { once: true });
-    noButton.addEventListener("click", () => finish("N"), { once: true });
+    document.getElementById("memory-yes").addEventListener("click", () => finish("Y"), { once: true });
+    document.getElementById("memory-no").addEventListener("click", () => finish("N"), { once: true });
     window.addEventListener("keydown", handleKeydown);
   });
 }
@@ -527,21 +588,23 @@ async function runMatchingBlock(trials, isPractice) {
     await showMatchingPreview(trial, index + 1, trials.length, isPractice);
     const result = await showMatchingSorter(trial, index + 1, trials.length, isPractice);
     state.matchingResults.push(result);
-    record({
-      section: isPractice ? "matching_practice" : "matching",
-      trialIndex: index + 1,
-      trialId: trial.id,
-      target: trial.target,
-      stimuli: trial.stimuli.join(" | "),
-      assignments: result.details.map((detail) => `${detail.path}:${detail.assigned}`).join(" | "),
-      answerKey: result.details.map((detail) => `${detail.path}:${detail.expected}`).join(" | "),
-      points: result.points,
-      practice: isPractice,
+    await fetchJson(`${API_BASE}/runs/${state.runId}/matching-trials`, {
+      method: "POST",
+      body: JSON.stringify({
+        phase: isPractice ? "practice_matching" : "matching",
+        trial_index: index + 1,
+        trial_identifier: trial.id,
+        target_asset_id: trial.target.assetId || null,
+        target_url: trial.target.url,
+        details: result.details,
+        points: result.points,
+      }),
     });
   }
 }
 
 async function showMatchingPreview(trial, trialNumber, totalTrials, isPractice) {
+  const viewingTimeMs = Number(state.settings.viewingTimeMs || 5000);
   app.innerHTML = `
     <section class="screen">
       <article class="panel trial-shell">
@@ -552,26 +615,25 @@ async function showMatchingPreview(trial, trialNumber, totalTrials, isPractice) 
           </div>
           <div class="pill-row">
             <span class="pill-neutral">${isPractice ? "Practice" : "Scored"} Trial ${trialNumber} of ${totalTrials}</span>
-            <span class="pill-neutral">Target visible for 5 seconds</span>
+            <span class="pill-neutral">${Math.round(viewingTimeMs / 1000)} seconds</span>
           </div>
         </div>
-        <div class="progress-bar"><span id="match-preview-progress"></span></div>
+        <div class="progress-bar"><span id="preview-progress"></span></div>
         <div class="stimulus-frame">
-          <img src="${assetPath(trial.target)}" alt="Target face for trial ${trialNumber}">
+          <img src="${trial.target.url}" alt="Target face for trial ${trialNumber}">
         </div>
-        <p class="trial-note">Memorise the target. The target will disappear before classification begins.</p>
+        <p class="trial-note">Memorise the target. The target disappears before the classification step.</p>
       </article>
     </section>
   `;
 
-  record({
-    section: isPractice ? "matching_practice_preview" : "matching_preview",
+  await postEvent("matching-preview", isPractice ? "practice_matching" : "matching", {
     trialIndex: trialNumber,
     trialId: trial.id,
-    target: trial.target,
-  });
-
-  await animateProgress(document.getElementById("match-preview-progress"), data.settings.viewingTimeMs);
+    targetAssetId: trial.target.assetId || null,
+    targetUrl: trial.target.url,
+  }, trialNumber);
+  await animateProgress(document.getElementById("preview-progress"), viewingTimeMs);
 }
 
 function showMatchingSorter(trial, trialNumber, totalTrials, isPractice) {
@@ -586,30 +648,19 @@ function showMatchingSorter(trial, trialNumber, totalTrials, isPractice) {
             </div>
             <div class="pill-row">
               <span class="pill-neutral">${isPractice ? "Practice" : "Scored"} Trial ${trialNumber} of ${totalTrials}</span>
-              <span class="pill-neutral">Target hidden</span>
             </div>
           </div>
-          <p class="trial-note">Drag cards or use the quick buttons. All four cards must be classified before submission.</p>
           <div class="sort-layout">
             <section class="zone" data-zone="left">
-              <div class="zone-header">
-                <h3>Nonmatch Left</h3>
-                <span class="zone-count" id="count-left">0</span>
-              </div>
+              <div class="zone-header"><h3>Nonmatch Left</h3><span class="zone-count" id="count-left">0</span></div>
               <div class="cards" id="zone-left"></div>
             </section>
             <section class="zone" data-zone="center">
-              <div class="zone-header">
-                <h3>Waiting Area</h3>
-                <span class="zone-count" id="count-center">4</span>
-              </div>
+              <div class="zone-header"><h3>Waiting Area</h3><span class="zone-count" id="count-center">${trial.stimuli.length}</span></div>
               <div class="cards" id="zone-center"></div>
             </section>
             <section class="zone" data-zone="right">
-              <div class="zone-header">
-                <h3>Matching Right</h3>
-                <span class="zone-count" id="count-right">0</span>
-              </div>
+              <div class="zone-header"><h3>Matching Right</h3><span class="zone-count" id="count-right">0</span></div>
               <div class="cards" id="zone-right"></div>
             </section>
           </div>
@@ -621,22 +672,19 @@ function showMatchingSorter(trial, trialNumber, totalTrials, isPractice) {
       </section>
     `;
 
+    const assignments = Object.fromEntries(trial.stimuli.map((stimulus) => [stimulus.assetId || stimulus.url, "center"]));
     const containers = {
       left: document.getElementById("zone-left"),
       center: document.getElementById("zone-center"),
       right: document.getElementById("zone-right"),
     };
-
     const countNodes = {
       left: document.getElementById("count-left"),
       center: document.getElementById("count-center"),
       right: document.getElementById("count-right"),
     };
-
-    const submitButton = document.getElementById("submit-sort");
-    const resetButton = document.getElementById("reset-sort");
-    const assignments = Object.fromEntries(trial.stimuli.map((path) => [path, "center"]));
-    const cards = {};
+    const cards = new Map();
+    const keyFor = (stimulus) => stimulus.assetId || stimulus.url;
 
     const updateCounts = () => {
       const counts = { left: 0, center: 0, right: 0 };
@@ -646,87 +694,78 @@ function showMatchingSorter(trial, trialNumber, totalTrials, isPractice) {
       countNodes.left.textContent = counts.left;
       countNodes.center.textContent = counts.center;
       countNodes.right.textContent = counts.right;
-      submitButton.disabled = counts.center > 0;
+      document.getElementById("submit-sort").disabled = counts.center > 0;
     };
 
-    const moveCard = (path, zone) => {
-      assignments[path] = zone;
-      containers[zone].appendChild(cards[path]);
+    const moveStimulus = (stimulus, zone) => {
+      const key = keyFor(stimulus);
+      assignments[key] = zone;
+      containers[zone].appendChild(cards.get(key));
       updateCounts();
     };
 
-    const createCard = (path) => {
+    const createCard = (stimulus) => {
       const card = document.createElement("article");
       card.className = "card";
       card.draggable = true;
-      card.dataset.path = path;
       card.innerHTML = `
-        <img src="${assetPath(path)}" alt="Candidate face">
+        <img src="${stimulus.url}" alt="Candidate face">
         <div class="card-actions">
-          <button type="button" data-move="left">Nonmatch</button>
-          <button type="button" data-move="right">Match</button>
+          <button type="button" data-zone="left">Nonmatch</button>
+          <button type="button" data-zone="right">Match</button>
         </div>
       `;
-
+      const key = keyFor(stimulus);
       card.addEventListener("dragstart", (event) => {
-        event.dataTransfer.setData("text/plain", path);
+        event.dataTransfer.setData("text/plain", key);
         card.classList.add("dragging");
       });
-
       card.addEventListener("dragend", () => {
         card.classList.remove("dragging");
       });
-
       card.querySelectorAll("button").forEach((button) => {
-        button.addEventListener("click", () => {
-          moveCard(path, button.dataset.move);
-        });
+        button.addEventListener("click", () => moveStimulus(stimulus, button.dataset.zone));
       });
-
       return card;
     };
 
-    trial.stimuli.forEach((path) => {
-      cards[path] = createCard(path);
-      moveCard(path, "center");
+    trial.stimuli.forEach((stimulus) => {
+      const key = keyFor(stimulus);
+      cards.set(key, createCard(stimulus));
+      moveStimulus(stimulus, "center");
     });
 
     document.querySelectorAll(".zone").forEach((zoneElement) => {
-      zoneElement.addEventListener("dragover", (event) => {
-        event.preventDefault();
-      });
+      zoneElement.addEventListener("dragover", (event) => event.preventDefault());
       zoneElement.addEventListener("drop", (event) => {
         event.preventDefault();
-        const path = event.dataTransfer.getData("text/plain");
-        const zone = zoneElement.dataset.zone;
-        if (path && zone) {
-          moveCard(path, zone);
+        const key = event.dataTransfer.getData("text/plain");
+        const stimulus = trial.stimuli.find((entry) => keyFor(entry) === key);
+        if (stimulus) {
+          moveStimulus(stimulus, zoneElement.dataset.zone);
         }
       });
     });
 
-    resetButton.addEventListener("click", () => {
-      trial.stimuli.forEach((path) => {
-        moveCard(path, "center");
-      });
+    document.getElementById("reset-sort").addEventListener("click", () => {
+      trial.stimuli.forEach((stimulus) => moveStimulus(stimulus, "center"));
     });
 
-    submitButton.addEventListener("click", () => {
-      const details = trial.stimuli.map((path, index) => {
+    document.getElementById("submit-sort").addEventListener("click", () => {
+      const details = trial.stimuli.map((stimulus, index) => {
+        const key = keyFor(stimulus);
+        const assigned = assignments[key];
         const expected = trial.answers[index];
-        const assigned = assignments[path];
         return {
-          path,
+          assetId: stimulus.assetId || null,
+          path: stimulus.url,
           expected,
           assigned,
           correct: expected === assigned,
         };
       });
-      const points = details.filter((detail) => detail.correct).length;
       resolve({
-        trialId: trial.id,
-        practice: isPractice,
-        points,
+        points: details.filter((detail) => detail.correct).length,
         details,
       });
     });
@@ -735,38 +774,52 @@ function showMatchingSorter(trial, trialNumber, totalTrials, isPractice) {
   });
 }
 
-async function collectContact() {
-  renderBaseScreen({
-    step: "Contact",
-    title: "Optional Contact Details",
-    subtitle: "The public task offers an optional email field before showing results. This recreation keeps it local.",
-    sideHtml: sessionInfoHtml(`
-      <div class="mini-panel">
-        <strong>Optional</strong>
-        <p class="panel-copy">Leave this blank if you only want the scores and the downloadable CSV file.</p>
-      </div>
-    `),
-    bodyHtml: `
-      <div class="field field-full">
-        <label for="contact-email">Email Address</label>
-        <input id="contact-email" type="email" placeholder="Optional">
-        <p class="field-help">No email is sent anywhere by this app. The value is only included in the downloaded CSV.</p>
-      </div>
-    `,
-    actions: [{ id: "save-contact", label: "Continue To Results", className: "button-primary" }],
+async function submitFormSection(section, responses) {
+  await fetchJson(`${API_BASE}/runs/${state.runId}/forms`, {
+    method: "POST",
+    body: JSON.stringify({ section, responses }),
   });
+}
 
-  await waitForClick(document.getElementById("save-contact"));
-  state.contactEmail = document.getElementById("contact-email").value.trim();
-  record({
-    section: "contact",
-    email: state.contactEmail,
+async function postEvent(eventType, phase, payload = {}, eventIndex = null) {
+  await fetchJson(`${API_BASE}/runs/${state.runId}/events`, {
+    method: "POST",
+    body: JSON.stringify({
+      event_type: eventType,
+      phase,
+      event_index: Number.isInteger(eventIndex) ? eventIndex : null,
+      payload,
+    }),
   });
+}
+
+async function completeRun() {
+  const scores = computeScores();
+  await fetchJson(`${API_BASE}/runs/${state.runId}/complete`, {
+    method: "POST",
+    body: JSON.stringify(scores),
+  });
+}
+
+function computeScores() {
+  return {
+    memoryPoints: state.memoryResults.reduce((sum, trial) => sum + trial.points, 0),
+    matchPoints: state.matchingResults
+      .filter((trial) => !trial.practice)
+      .reduce((sum, trial) => sum + trial.points, 0),
+    overallPercent: Math.round(
+      ((state.memoryResults.reduce((sum, trial) => sum + trial.points, 0) +
+        state.matchingResults.filter((trial) => !trial.practice).reduce((sum, trial) => sum + trial.points, 0)) /
+        120) *
+        100,
+    ),
+  };
 }
 
 function renderResults() {
   const scores = computeScores();
-  const benchmarks = data.percentileBenchmarks;
+  const benchmarks = state.settings.benchmarks || {};
+  const resultPages = normalizePages(state.pages.resultsDisclosure);
 
   app.innerHTML = `
     <section class="screen">
@@ -775,8 +828,8 @@ function renderResults() {
           <p class="eyebrow">Results</p>
           <h2>Face Test Complete</h2>
           <p class="results-copy">
-            Thank you for completing the local recreation. Your scores below follow the same public
-            scoring split used by the original UNSW task.
+            This run was recorded on the server under study <strong>${escapeHtml(state.study.title)}</strong>,
+            version ${state.version.version_number}.
           </p>
           <div class="results-grid">
             <div class="score-card">
@@ -793,119 +846,42 @@ function renderResults() {
             </div>
           </div>
           <div class="hero-actions">
-            <button id="download-csv" class="button button-primary">Download CSV</button>
-            <button id="restart-test" class="button button-secondary">Restart</button>
+            <button id="restart-run" class="button button-primary">Restart</button>
           </div>
         </div>
         <div class="hero-aside">
           <div class="notice-card">
-            <strong>Percentile Benchmarks</strong>
-            <p class="panel-copy">Top 5%: ${benchmarks.top5}% and above</p>
-            <p class="panel-copy">Top 10%: ${benchmarks.top10}% and above</p>
-            <p class="panel-copy">Top 25%: ${benchmarks.top25}% and above</p>
-            <p class="panel-copy">Top 50%: ${benchmarks.top50}% and above</p>
+            <strong>Benchmarks</strong>
+            <p class="panel-copy">Top 5%: ${escapeHtml(String(benchmarks.top5 ?? "n/a"))}% and above</p>
+            <p class="panel-copy">Top 10%: ${escapeHtml(String(benchmarks.top10 ?? "n/a"))}% and above</p>
+            <p class="panel-copy">Top 25%: ${escapeHtml(String(benchmarks.top25 ?? "n/a"))}% and above</p>
+            <p class="panel-copy">Top 50%: ${escapeHtml(String(benchmarks.top50 ?? "n/a"))}% and above</p>
           </div>
-          <div class="notice-card">
-            <strong>Local Export</strong>
-            <p class="panel-copy">The CSV includes demographics, response-level logs, optional contact email, and session IDs.</p>
-          </div>
-          <div class="notice-card">
-            <strong>Original Finish Flow</strong>
-            <p class="panel-copy">The public site redirects to a separate finish page. This local recreation keeps the finish state here and offers immediate export.</p>
-          </div>
+          ${
+            resultPages.length
+              ? `<div class="notice-card"><strong>Study Notes</strong>${resultPages
+                  .map((page) => `<div class="panel-copy">${page}</div>`)
+                  .join("")}</div>`
+              : ""
+          }
         </div>
       </article>
     </section>
   `;
 
-  document.getElementById("download-csv").addEventListener("click", () => {
-    const filename = `face-test-local-${state.subjectId}-${state.subjectId2}.csv`;
-    downloadCsv(filename, buildCsv(scores));
-  });
-
-  document.getElementById("restart-test").addEventListener("click", () => {
-    window.location.reload();
-  });
-}
-
-function computeScores() {
-  const memoryPoints = state.memoryResults.reduce((total, trial) => total + trial.points, 0);
-  const matchPoints = state.matchingResults
-    .filter((trial) => !trial.practice)
-    .reduce((total, trial) => total + trial.points, 0);
-  return {
-    memoryPoints,
-    matchPoints,
-    overallPercent: Math.round(((memoryPoints + matchPoints) / 120) * 100),
-  };
-}
-
-function buildCsv(scores) {
-  const rows = [
-    {
-      rowType: "summary",
-      subject: state.subjectId,
-      subject2: state.subjectId2,
-      sessionStartedAt: state.sessionStartedAt,
-      age: state.demographics.age,
-      ageBracket: state.demographics.ageBracket,
-      gender: state.demographics.gender,
-      ethnicity: state.demographics.ethnicity,
-      contactEmail: state.contactEmail,
-      memoryPoints: scores.memoryPoints,
-      matchPoints: scores.matchPoints,
-      overallPercent: scores.overallPercent,
-    },
-    ...state.records,
-  ];
-
-  const headers = [...new Set(rows.flatMap((row) => Object.keys(row)))];
-  const lines = [
-    headers.join(","),
-    ...rows.map((row) => headers.map((header) => csvCell(row[header] ?? "")).join(",")),
-  ];
-  return lines.join("\n");
-}
-
-function record(entry) {
-  state.records.push({
-    rowType: "event",
-    subject: state.subjectId,
-    subject2: state.subjectId2,
-    timestamp: new Date().toISOString(),
-    ...entry,
-  });
-}
-
-function csvCell(value) {
-  const text = String(value).replace(/"/g, '""');
-  return `"${text}"`;
+  postEvent("results-view", "results", scores).catch(() => {});
+  document.getElementById("restart-run").addEventListener("click", () => window.location.reload());
 }
 
 function waitForClick(element) {
-  return new Promise((resolve) => {
-    element.addEventListener("click", resolve, { once: true });
-  });
-}
-
-function assetPath(relativePath) {
-  return `./assets/${relativePath}`;
-}
-
-function shuffle(items) {
-  const copy = [...items];
-  for (let index = copy.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
-  }
-  return copy;
+  return new Promise((resolve) => element.addEventListener("click", resolve, { once: true }));
 }
 
 function animateProgress(fillElement, durationMs) {
   return new Promise((resolve) => {
-    const start = performance.now();
+    const started = performance.now();
     const tick = (now) => {
-      const progress = Math.min((now - start) / durationMs, 1);
+      const progress = Math.min((now - started) / durationMs, 1);
       fillElement.style.width = `${progress * 100}%`;
       if (progress < 1) {
         window.requestAnimationFrame(tick);
@@ -923,24 +899,10 @@ async function requestFullscreenSafe() {
   }
   try {
     await document.documentElement.requestFullscreen();
-  } catch (error) {
-    record({
-      section: "fullscreen",
-      response: "denied_or_unavailable",
-    });
+    await postEvent("fullscreen-entered", "session", {});
+  } catch {
+    await postEvent("fullscreen-unavailable", "session", {});
   }
-}
-
-function downloadCsv(filename, content) {
-  const blob = new Blob([content], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
 }
 
 function renderFatalError(error) {
@@ -949,17 +911,26 @@ function renderFatalError(error) {
     <section class="screen">
       <article class="panel content-panel">
         <p class="step-label">Error</p>
-        <h2 class="screen-title">The app hit an unexpected problem.</h2>
-        <p class="screen-subtitle">Open the browser console for more detail, then reload the page.</p>
+        <h2 class="screen-title">The face test hit an unexpected problem.</h2>
+        <p class="screen-subtitle">Check that the API is running and that a study has been published.</p>
         <pre class="copy-box">${escapeHtml(String(error))}</pre>
+        <div class="actions">
+          <button id="reload-page" class="button button-primary">Reload</button>
+          <a class="button button-secondary" href="./admin.html">Admin</a>
+        </div>
       </article>
     </section>
   `;
+  document.getElementById("reload-page")?.addEventListener("click", () => window.location.reload());
 }
 
 function escapeHtml(text) {
-  return text
+  return String(text)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function escapeAttribute(text) {
+  return escapeHtml(String(text)).replaceAll('"', "&quot;");
 }
