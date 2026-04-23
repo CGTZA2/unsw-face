@@ -101,9 +101,6 @@ export async function ensureDatabase(dbPath = process.env.FACETEST_DB_PATH || DE
 
     CREATE INDEX IF NOT EXISTS idx_facetest_assets_study_role
       ON facetest_assets(study_id, asset_role);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_facetest_assets_study_asset_key
-      ON facetest_assets(study_id, asset_key)
-      WHERE asset_key IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_facetest_assets_identity
       ON facetest_assets(study_id, identity_id);
     CREATE INDEX IF NOT EXISTS idx_facetest_assets_trial_set
