@@ -5,6 +5,14 @@ import { DatabaseSync } from "node:sqlite";
 
 export const DEFAULT_DB_PATH = path.join(process.cwd(), "data", "unsw-face.sqlite");
 
+function addColumnIfMissing(db, tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  const exists = columns.some((column) => column.name === columnName);
+  if (!exists) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+
 export async function ensureDatabase(dbPath = process.env.FACETEST_DB_PATH || DEFAULT_DB_PATH) {
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
@@ -72,6 +80,7 @@ export async function ensureDatabase(dbPath = process.env.FACETEST_DB_PATH || DE
     CREATE TABLE IF NOT EXISTS facetest_assets (
       id TEXT PRIMARY KEY,
       study_id TEXT NOT NULL,
+      asset_key TEXT,
       population_id TEXT,
       display_label TEXT,
       asset_role TEXT NOT NULL,
@@ -92,6 +101,9 @@ export async function ensureDatabase(dbPath = process.env.FACETEST_DB_PATH || DE
 
     CREATE INDEX IF NOT EXISTS idx_facetest_assets_study_role
       ON facetest_assets(study_id, asset_role);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_facetest_assets_study_asset_key
+      ON facetest_assets(study_id, asset_key)
+      WHERE asset_key IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_facetest_assets_identity
       ON facetest_assets(study_id, identity_id);
     CREATE INDEX IF NOT EXISTS idx_facetest_assets_trial_set
@@ -219,6 +231,13 @@ export async function ensureDatabase(dbPath = process.env.FACETEST_DB_PATH || DE
       detail_json TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+  `);
+
+  addColumnIfMissing(db, "facetest_assets", "asset_key", "TEXT");
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_facetest_assets_study_asset_key
+      ON facetest_assets(study_id, asset_key)
+      WHERE asset_key IS NOT NULL;
   `);
 
   return db;

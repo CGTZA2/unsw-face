@@ -54,6 +54,7 @@ This document describes the face-test-specific tables and the main data each one
 
 - `id`
 - `study_id`
+- `asset_key`: stable external key used by bulk-import deduplication
 - `population_id`
 - `display_label`
 - `asset_role`
@@ -234,6 +235,34 @@ Includes all columns from `facetest_run_forms`.
 ### Raw export
 
 Includes all columns from `facetest_raw_rows`.
+
+## Bulk Import Interface
+
+Admin bulk asset import endpoint:
+
+- `POST /api/facetest/admin/imports/assets`
+
+Request shape:
+
+- multipart upload
+- `study_id` form field
+- `archive` file field containing one zip
+
+Zip contents:
+
+- `manifest.csv` at zip root
+- image files referenced by `relative_path`
+
+Manifest columns:
+
+- required: `asset_key`, `relative_path`, `population_slug`, `asset_role`, `display_label`
+- conditional: `identity_id`, `trial_set_id`, `expected_side`
+- optional: `is_available`, `metadata_json`
+
+Duplicate policy:
+
+- uniqueness is `study_id + asset_key`
+- existing keys are skipped, not overwritten
 
 ## PII Note
 

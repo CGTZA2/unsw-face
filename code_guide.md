@@ -51,6 +51,8 @@ Notable backend behaviors:
 
 - admin auth uses the standalone `x-facetest-admin-token` header
 - uploaded assets are written to the filesystem under `FACETEST_ASSET_DIR` or `data/assets`
+- bulk import accepts one zip with `manifest.csv` plus referenced image files
+- `asset_key` is the stable deduplication key within a study
 - matching trials are grouped via `trial_set_id`
 - study and memory-old linkage depends on shared `identity_id`
 - publish validation checks that a version is complete and that sampling rules can be satisfied
@@ -82,7 +84,9 @@ It supports:
 - creating/cloning versions
 - saving page/form/settings config
 - creating populations
-- uploading assets
+- bulk-importing asset batches
+- downloading a sample manifest
+- uploading single assets for maintenance
 - saving selection rules
 - publishing versions
 - loading runs and downloading CSV exports
@@ -101,9 +105,31 @@ The current implementation relies on these asset roles:
 
 Conventions that matter:
 
+- every imported row should carry a stable `asset_key`
 - `study` and `memory_old` assets should share an `identity_id`
 - each matching/practice set needs one target plus at least four probes sharing the same `trial_set_id`
 - probe assets require `expected_side` of `left` or `right`
+
+## Bulk Import
+
+Primary import path:
+
+- upload one zip in the admin UI
+- include `manifest.csv` at the zip root
+- include images under `assets/<population_slug>/<asset_role>/...`
+- the manifest is authoritative if folder names disagree
+
+Manifest columns:
+
+- required: `asset_key`, `relative_path`, `population_slug`, `asset_role`, `display_label`
+- conditional: `identity_id`, `trial_set_id`, `expected_side`
+- optional: `is_available`, `metadata_json`
+
+Importer behavior:
+
+- validates the whole batch before creating rows
+- skips asset keys that already exist in the target study
+- does not overwrite existing files or metadata in v1
 
 ## Selection Rules
 
@@ -126,19 +152,18 @@ Current v1 behavior:
 
 ## Important Constraints
 
-- The standalone API accepts JSON bodies up to `10mb` to support base64 image uploads. If researchers upload large images, consider moving to multipart upload or client-side resizing.
+- The standalone API still supports single-image base64 uploads for maintenance, but the primary workflow is now multipart zip import.
 - The admin UI currently stores page arrays via textarea separators and demographics/rule/settings config as JSON textareas. This is functional, but not yet polished.
 - The participant app assumes a 40-point memory section and 80-point scored matching section when computing results, matching the original recreation.
 - The browser code auto-derives `/api/facetest` and can also be overridden with a `<meta name="facetest-api-base">`.
 
 ## Recommended Next Improvements
 
-- Replace base64 JSON uploads with multipart upload for larger files.
 - Add richer admin editing for page blocks and form fields.
 - Add deletion/editing UI for existing populations/assets/rules.
 - Add per-run detail view links in the admin UI.
 - Add browser-based E2E verification once Node/browser tooling is available in the environment.
-- Add migration/bootstrap tooling if you want to ingest the original legacy asset bundle into the admin-managed schema automatically.
+- Add a downloadable example zip template, not just a sample manifest.
 
 ## Verification Caveat
 

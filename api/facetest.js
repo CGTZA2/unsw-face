@@ -1,6 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import multer from "multer";
+import AdmZip from "adm-zip";
+import { parse as parseCsv } from "csv-parse/sync";
 import { newId, nowIso, userAgentHash } from "./db.js";
 
 const FACE_TEST_PHASES = new Set([
@@ -21,6 +24,21 @@ const ASSET_ROLES = new Set([
   "matching_probe",
 ]);
 
+const REQUIRED_BULK_IMPORT_HEADERS = [
+  "asset_key",
+  "relative_path",
+  "population_slug",
+  "asset_role",
+  "display_label",
+];
+
+const bulkImportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 250 * 1024 * 1024,
+  },
+});
+
 function getFaceTestAssetDir() {
   return process.env.FACETEST_ASSET_DIR
     ? path.resolve(process.env.FACETEST_ASSET_DIR)
@@ -40,6 +58,26 @@ function sanitizeFileName(value) {
   return cleaned.length ? cleaned : "asset.bin";
 }
 
+function sanitizeAssetKey(value) {
+  return String(value || "").trim();
+}
+
+function inferMimeType(fileName) {
+  const extension = path.extname(String(fileName || "")).toLowerCase();
+  return (
+    {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+      ".bmp": "image/bmp",
+      ".tif": "image/tiff",
+      ".tiff": "image/tiff",
+    }[extension] || "application/octet-stream"
+  );
+}
+
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -51,6 +89,26 @@ function asJson(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function parseBooleanLike(value, fallback = true) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "y"].includes(normalized)) return true;
+  if (["0", "false", "no", "n"].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizeZipRelativePath(value) {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "");
+  if (!normalized || normalized.split("/").some((segment) => segment === "..")) {
+    return null;
+  }
+  return normalized;
 }
 
 function badRequest(res, message, status = 400) {
@@ -137,17 +195,25 @@ async function ensureAssetDirectory() {
   await fs.mkdir(getFaceTestAssetDir(), { recursive: true });
 }
 
-async function writeAssetFile({ assetId, fileName, base64Data }) {
+async function writeAssetBuffer({ assetId, fileName, buffer }) {
   await ensureAssetDirectory();
   const directory = path.join(getFaceTestAssetDir(), assetId);
   await fs.mkdir(directory, { recursive: true });
   const safeName = sanitizeFileName(fileName);
   const absolutePath = path.join(directory, safeName);
-  await fs.writeFile(absolutePath, Buffer.from(base64Data, "base64"));
+  await fs.writeFile(absolutePath, buffer);
   return {
     absolutePath,
     publicPath: `/api/facetest/assets/${assetId}/${safeName}`,
   };
+}
+
+async function writeAssetFile({ assetId, fileName, base64Data }) {
+  return writeAssetBuffer({
+    assetId,
+    fileName,
+    buffer: Buffer.from(base64Data, "base64"),
+  });
 }
 
 async function deleteAssetFile(filePath) {
@@ -221,6 +287,208 @@ function getAssetsForStudy(db, studyId) {
     WHERE study_id = ?
     ORDER BY created_at DESC
   `).all(studyId).map(parseAsset);
+}
+
+function getPopulationBySlug(db, studyId, slug) {
+  return db.prepare(`
+    SELECT *
+    FROM facetest_populations
+    WHERE study_id = ? AND slug = ?
+    LIMIT 1
+  `).get(studyId, slug);
+}
+
+function getExistingAssetKeys(db, studyId) {
+  return new Set(
+    db.prepare(`
+      SELECT asset_key
+      FROM facetest_assets
+      WHERE study_id = ? AND asset_key IS NOT NULL
+    `)
+      .all(studyId)
+      .map((row) => row.asset_key),
+  );
+}
+
+function parseBulkManifestCsv(buffer) {
+  let headers = [];
+  const rows = parseCsv(buffer, {
+    bom: true,
+    columns: (columnNames) => {
+      headers = columnNames.map((columnName) => String(columnName || "").trim());
+      return headers;
+    },
+    relax_column_count: true,
+    skip_empty_lines: true,
+    trim: true,
+  });
+  return { headers, rows };
+}
+
+function parseImportMetadata(rawValue, rowNumber, issues) {
+  if (!requireString(rawValue)) return {};
+  try {
+    return JSON.parse(rawValue);
+  } catch {
+    issues.push({
+      rowNumber,
+      assetKey: null,
+      status: "failed",
+      message: "metadata_json must contain valid JSON when provided",
+    });
+    return null;
+  }
+}
+
+function validateImportRowShape(row, rowNumber, populationsBySlug, zipEntriesByPath, seenAssetKeys) {
+  const issues = [];
+  const assetKey = sanitizeAssetKey(row.asset_key);
+  const relativePath = normalizeZipRelativePath(row.relative_path);
+  const populationSlug = sanitizeSlug(row.population_slug);
+  const assetRole = String(row.asset_role || "").trim();
+  const displayLabel = String(row.display_label || "").trim();
+  const identityId = String(row.identity_id || "").trim() || null;
+  const trialSetId = String(row.trial_set_id || "").trim() || null;
+  const expectedSide = String(row.expected_side || "").trim() || null;
+  const metadata = parseImportMetadata(row.metadata_json, rowNumber, issues);
+  const isAvailable = parseBooleanLike(row.is_available, true);
+
+  if (!requireString(assetKey)) {
+    issues.push({ rowNumber, assetKey: null, status: "failed", message: "asset_key is required" });
+  } else if (seenAssetKeys.has(assetKey)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: "asset_key is duplicated inside this zip" });
+  } else {
+    seenAssetKeys.add(assetKey);
+  }
+
+  if (!relativePath) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: "relative_path is required and must stay inside the zip" });
+  } else if (!zipEntriesByPath.has(relativePath)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: `relative_path does not exist in zip: ${relativePath}` });
+  }
+
+  if (!requireString(populationSlug)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: "population_slug is required" });
+  } else if (!populationsBySlug.has(populationSlug)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: `unknown population_slug: ${populationSlug}` });
+  }
+
+  if (!ASSET_ROLES.has(assetRole)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: `unsupported asset_role: ${assetRole || "missing"}` });
+  }
+
+  if (!requireString(displayLabel)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: "display_label is required" });
+  }
+
+  if ((assetRole === "study" || assetRole === "memory_old") && !requireString(identityId)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: "identity_id is required for study and memory_old rows" });
+  }
+
+  if ((assetRole.endsWith("_target") || assetRole.endsWith("_probe")) && !requireString(trialSetId)) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: "trial_set_id is required for matching and practice rows" });
+  }
+
+  if (assetRole.endsWith("_probe") && !["left", "right"].includes(expectedSide || "")) {
+    issues.push({ rowNumber, assetKey, status: "failed", message: "expected_side must be left or right for probe rows" });
+  }
+
+  if (metadata === null) {
+    return { issues };
+  }
+
+  const zipEntry = relativePath ? zipEntriesByPath.get(relativePath) : null;
+  const fileName = zipEntry ? path.basename(zipEntry.entryName) : null;
+
+  return {
+    issues,
+    row: {
+      rowNumber,
+      assetKey,
+      relativePath,
+      populationSlug,
+      assetRole,
+      displayLabel,
+      identityId,
+      trialSetId,
+      expectedSide,
+      metadata,
+      isAvailable,
+      populationId: populationsBySlug.get(populationSlug)?.id || null,
+      zipEntry,
+      fileName,
+    },
+  };
+}
+
+function parseBulkImportArchive(buffer, populationsBySlug) {
+  let zip;
+  try {
+    zip = new AdmZip(buffer);
+  } catch {
+    return {
+      issues: [{ rowNumber: 0, assetKey: null, status: "failed", message: "uploaded file is not a readable zip archive" }],
+      rows: [],
+    };
+  }
+
+  const fileEntries = zip
+    .getEntries()
+    .filter((entry) => !entry.isDirectory)
+    .map((entry) => ({
+      ...entry,
+      normalizedPath: normalizeZipRelativePath(entry.entryName),
+    }))
+    .filter((entry) => entry.normalizedPath);
+
+  const zipEntriesByPath = new Map(fileEntries.map((entry) => [entry.normalizedPath, entry]));
+  const manifestEntry = zipEntriesByPath.get("manifest.csv");
+  if (!manifestEntry) {
+    return {
+      issues: [{ rowNumber: 0, assetKey: null, status: "failed", message: "zip must contain manifest.csv at its root" }],
+      rows: [],
+    };
+  }
+
+  let manifest;
+  try {
+    manifest = parseBulkManifestCsv(manifestEntry.getData());
+  } catch (error) {
+    return {
+      issues: [{ rowNumber: 0, assetKey: null, status: "failed", message: `manifest.csv could not be parsed: ${error.message}` }],
+      rows: [],
+    };
+  }
+
+  const missingHeaders = REQUIRED_BULK_IMPORT_HEADERS.filter((header) => !manifest.headers.includes(header));
+  if (missingHeaders.length) {
+    return {
+      issues: [
+        {
+          rowNumber: 0,
+          assetKey: null,
+          status: "failed",
+          message: `manifest.csv is missing required headers: ${missingHeaders.join(", ")}`,
+        },
+      ],
+      rows: [],
+    };
+  }
+
+  const seenAssetKeys = new Set();
+  const issues = [];
+  const rows = [];
+
+  manifest.rows.forEach((rawRow, index) => {
+    const rowNumber = index + 2;
+    const result = validateImportRowShape(rawRow, rowNumber, populationsBySlug, zipEntriesByPath, seenAssetKeys);
+    issues.push(...result.issues);
+    if (result.row) {
+      rows.push(result.row);
+    }
+  });
+
+  return { issues, rows };
 }
 
 function ensureDraftVersion(version, res) {
@@ -1305,6 +1573,131 @@ export function registerFaceTestRoutes(app, db) {
     return res.json({ ok: true, assets: getAssetsForStudy(db, studyId) });
   });
 
+  app.post("/api/facetest/admin/imports/assets", bulkImportUpload.single("archive"), async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const studyId = String(req.body?.study_id || "").trim();
+    if (!requireString(studyId)) {
+      return badRequest(res, "study_id is required");
+    }
+    const study = getStudyById(db, studyId);
+    if (!study) {
+      return badRequest(res, "unknown study", 404);
+    }
+    if (!req.file?.buffer?.length) {
+      return badRequest(res, "zip archive is required in the archive field");
+    }
+
+    const populationsBySlug = new Map(getPopulationsForStudy(db, studyId).map((population) => [population.slug, population]));
+    const parsed = parseBulkImportArchive(req.file.buffer, populationsBySlug);
+    if (parsed.issues.length) {
+      return res.status(422).json({
+        error: "bulk import validation failed",
+        summary: {
+          totalRows: parsed.rows.length,
+          created: 0,
+          skipped: 0,
+          failed: parsed.issues.length,
+        },
+        results: parsed.issues,
+        validationErrors: parsed.issues.map((issue) => `row ${issue.rowNumber}: ${issue.message}`),
+      });
+    }
+
+    const existingAssetKeys = getExistingAssetKeys(db, studyId);
+    const rowsToCreate = [];
+    const results = [];
+
+    for (const row of parsed.rows) {
+      if (existingAssetKeys.has(row.assetKey)) {
+        results.push({
+          rowNumber: row.rowNumber,
+          assetKey: row.assetKey,
+          status: "skipped",
+          message: "asset_key already exists for this study",
+        });
+      } else {
+        rowsToCreate.push(row);
+      }
+    }
+
+    const writtenPaths = [];
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      for (const row of rowsToCreate) {
+        const assetId = newId();
+        const fileBuffer = row.zipEntry.getData();
+        const saved = await writeAssetBuffer({
+          assetId,
+          fileName: row.fileName,
+          buffer: fileBuffer,
+        });
+        writtenPaths.push(saved.absolutePath);
+        const timestamp = nowIso();
+
+        db.prepare(`
+          INSERT INTO facetest_assets (
+            id, study_id, asset_key, population_id, display_label, asset_role, identity_id, trial_set_id, expected_side,
+            file_name, mime_type, file_path, public_path, metadata_json, is_available, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          assetId,
+          studyId,
+          row.assetKey,
+          row.populationId,
+          row.displayLabel,
+          row.assetRole,
+          row.identityId,
+          row.trialSetId,
+          row.expectedSide,
+          sanitizeFileName(row.fileName),
+          inferMimeType(row.fileName),
+          saved.absolutePath,
+          saved.publicPath,
+          JSON.stringify(row.metadata || {}),
+          row.isAvailable ? 1 : 0,
+          timestamp,
+          timestamp,
+        );
+
+        results.push({
+          rowNumber: row.rowNumber,
+          assetKey: row.assetKey,
+          status: "created",
+          message: "imported",
+        });
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      await Promise.all(writtenPaths.map((filePath) => deleteAssetFile(filePath)));
+      return res.status(500).json({
+        error: `bulk import failed: ${error.message}`,
+      });
+    }
+
+    audit(db, "bulk-import-assets", "study", studyId, {
+      file_name: req.file.originalname,
+      total_rows: parsed.rows.length,
+      created: results.filter((entry) => entry.status === "created").length,
+      skipped: results.filter((entry) => entry.status === "skipped").length,
+    });
+
+    return res.status(201).json({
+      ok: true,
+      summary: {
+        totalRows: parsed.rows.length,
+        created: results.filter((entry) => entry.status === "created").length,
+        skipped: results.filter((entry) => entry.status === "skipped").length,
+        failed: 0,
+      },
+      results,
+      assets: getAssetsForStudy(db, studyId),
+    });
+  });
+
   app.post("/api/facetest/admin/assets", async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const studyId = String(req.body?.study_id || "").trim();
@@ -1312,6 +1705,7 @@ export function registerFaceTestRoutes(app, db) {
     const mimeType = String(req.body?.mime_type || "application/octet-stream").trim();
     const base64Data = String(req.body?.data_base64 || "").trim();
     const assetRole = String(req.body?.asset_role || "").trim();
+    const assetKey = sanitizeAssetKey(req.body?.asset_key || newId());
     if (!requireString(studyId) || !requireString(fileName) || !requireString(base64Data) || !ASSET_ROLES.has(assetRole)) {
       return badRequest(res, "study_id, file_name, data_base64, and a supported asset_role are required");
     }
@@ -1333,19 +1727,23 @@ export function registerFaceTestRoutes(app, db) {
     if (assetRole.endsWith("_probe") && !["left", "right"].includes(req.body?.expected_side)) {
       return badRequest(res, "expected_side must be left or right for matching probes");
     }
+    if (getExistingAssetKeys(db, studyId).has(assetKey)) {
+      return badRequest(res, `asset_key already exists for this study: ${assetKey}`, 409);
+    }
 
     const assetId = newId();
     const saved = await writeAssetFile({ assetId, fileName, base64Data });
     const timestamp = nowIso();
     db.prepare(`
       INSERT INTO facetest_assets (
-        id, study_id, population_id, display_label, asset_role, identity_id, trial_set_id, expected_side,
+        id, study_id, asset_key, population_id, display_label, asset_role, identity_id, trial_set_id, expected_side,
         file_name, mime_type, file_path, public_path, metadata_json, is_available, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       assetId,
       studyId,
+      assetKey,
       req.body?.population_id || null,
       String(req.body?.display_label || fileName),
       assetRole,
@@ -1362,7 +1760,11 @@ export function registerFaceTestRoutes(app, db) {
       timestamp,
     );
 
-    audit(db, "upload-asset", "asset", assetId, { study_id: studyId, asset_role: assetRole });
+    audit(db, "upload-asset", "asset", assetId, {
+      study_id: studyId,
+      asset_key: assetKey,
+      asset_role: assetRole,
+    });
     return res.status(201).json({ ok: true, asset: getAssetsForStudy(db, studyId).find((entry) => entry.id === assetId) });
   });
 

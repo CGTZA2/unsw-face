@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
+import AdmZip from "adm-zip";
 import { createApp } from "../app.js";
 
 const TINY_PNG_BASE64 =
@@ -47,6 +48,27 @@ async function api(server, pathname, { method = "GET", body, headers = {} } = {}
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {}
+  return { response, json, text };
+}
+
+async function multipart(server, pathname, { fields = {}, file } = {}) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    form.set(key, value);
+  }
+  if (file) {
+    form.set(file.fieldName, new Blob([file.buffer], { type: file.type || "application/zip" }), file.fileName);
+  }
+
+  const response = await fetch(`${server.base}${pathname}`, {
+    method: "POST",
+    body: form,
   });
   const text = await response.text();
   let json = null;
@@ -118,6 +140,48 @@ async function uploadAsset(server, studyId, populationId, overrides) {
   return result.json.asset;
 }
 
+function createAssetImportZip(rows) {
+  const zip = new AdmZip();
+  const manifest = [
+    "asset_key,relative_path,population_slug,asset_role,display_label,identity_id,trial_set_id,expected_side,is_available,metadata_json",
+    ...rows.map((row) =>
+      [
+        row.asset_key,
+        row.relative_path,
+        row.population_slug,
+        row.asset_role,
+        row.display_label,
+        row.identity_id || "",
+        row.trial_set_id || "",
+        row.expected_side || "",
+        row.is_available ?? "true",
+        JSON.stringify(row.metadata || {}),
+      ]
+        .map((value) => `"${String(value).replace(/"/g, '""')}"`)
+        .join(","),
+    ),
+  ].join("\n");
+  zip.addFile("manifest.csv", Buffer.from(manifest, "utf8"));
+  for (const row of rows) {
+    zip.addFile(row.relative_path, Buffer.from(TINY_PNG_BASE64, "base64"));
+  }
+  return zip.toBuffer();
+}
+
+async function bulkImportAssets(server, studyId, rows) {
+  const result = await multipart(server, "/api/facetest/admin/imports/assets", {
+    fields: { study_id: studyId },
+    file: {
+      fieldName: "archive",
+      fileName: "assets.zip",
+      buffer: createAssetImportZip(rows),
+      type: "application/zip",
+    },
+  });
+  assert.equal(result.response.status, 201);
+  return result.json;
+}
+
 async function saveForms(server, versionId) {
   const result = await api(server, `/api/facetest/admin/versions/${versionId}/forms`, {
     method: "PUT",
@@ -177,96 +241,145 @@ async function createPublishedStudy(server) {
 
   await saveForms(server, version.id);
 
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Study A",
-    asset_role: "study",
-    identity_id: "identity-a",
-  });
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Memory Old A",
-    asset_role: "memory_old",
-    identity_id: "identity-a",
-  });
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Study B",
-    asset_role: "study",
-    identity_id: "identity-b",
-  });
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Memory Old B",
-    asset_role: "memory_old",
-    identity_id: "identity-b",
-  });
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Memory New A",
-    asset_role: "memory_new",
-    identity_id: "identity-new-a",
-  });
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Memory New B",
-    asset_role: "memory_new",
-    identity_id: "identity-new-b",
-  });
-
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Practice Target",
-    asset_role: "practice_target",
-    trial_set_id: "practice-1",
-  });
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Practice Probe 1",
-    asset_role: "practice_probe",
-    trial_set_id: "practice-1",
-    expected_side: "right",
-  });
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Practice Probe 2",
-    asset_role: "practice_probe",
-    trial_set_id: "practice-1",
-    expected_side: "left",
-  });
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Practice Probe 3",
-    asset_role: "practice_probe",
-    trial_set_id: "practice-1",
-    expected_side: "right",
-  });
-  await uploadAsset(server, study.id, popA.id, {
-    display_label: "Practice Probe 4",
-    asset_role: "practice_probe",
-    trial_set_id: "practice-1",
-    expected_side: "left",
-  });
-
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Matching Target",
-    asset_role: "matching_target",
-    trial_set_id: "matching-1",
-  });
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Matching Probe 1",
-    asset_role: "matching_probe",
-    trial_set_id: "matching-1",
-    expected_side: "left",
-  });
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Matching Probe 2",
-    asset_role: "matching_probe",
-    trial_set_id: "matching-1",
-    expected_side: "right",
-  });
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Matching Probe 3",
-    asset_role: "matching_probe",
-    trial_set_id: "matching-1",
-    expected_side: "left",
-  });
-  await uploadAsset(server, study.id, popB.id, {
-    display_label: "Matching Probe 4",
-    asset_role: "matching_probe",
-    trial_set_id: "matching-1",
-    expected_side: "right",
-  });
+  const importBody = await bulkImportAssets(server, study.id, [
+    {
+      asset_key: "study-a",
+      relative_path: "assets/population-a/study/study-a.png",
+      population_slug: "population-a",
+      asset_role: "study",
+      display_label: "Study A",
+      identity_id: "identity-a",
+    },
+    {
+      asset_key: "memory-old-a",
+      relative_path: "assets/population-a/memory_old/memory-old-a.png",
+      population_slug: "population-a",
+      asset_role: "memory_old",
+      display_label: "Memory Old A",
+      identity_id: "identity-a",
+    },
+    {
+      asset_key: "study-b",
+      relative_path: "assets/population-b/study/study-b.png",
+      population_slug: "population-b",
+      asset_role: "study",
+      display_label: "Study B",
+      identity_id: "identity-b",
+    },
+    {
+      asset_key: "memory-old-b",
+      relative_path: "assets/population-b/memory_old/memory-old-b.png",
+      population_slug: "population-b",
+      asset_role: "memory_old",
+      display_label: "Memory Old B",
+      identity_id: "identity-b",
+    },
+    {
+      asset_key: "memory-new-a",
+      relative_path: "assets/population-a/memory_new/memory-new-a.png",
+      population_slug: "population-a",
+      asset_role: "memory_new",
+      display_label: "Memory New A",
+      identity_id: "identity-new-a",
+    },
+    {
+      asset_key: "memory-new-b",
+      relative_path: "assets/population-b/memory_new/memory-new-b.png",
+      population_slug: "population-b",
+      asset_role: "memory_new",
+      display_label: "Memory New B",
+      identity_id: "identity-new-b",
+    },
+    {
+      asset_key: "practice-target-1",
+      relative_path: "assets/population-a/practice_target/practice-target-1.png",
+      population_slug: "population-a",
+      asset_role: "practice_target",
+      display_label: "Practice Target",
+      trial_set_id: "practice-1",
+    },
+    {
+      asset_key: "practice-probe-1",
+      relative_path: "assets/population-a/practice_probe/practice-probe-1.png",
+      population_slug: "population-a",
+      asset_role: "practice_probe",
+      display_label: "Practice Probe 1",
+      trial_set_id: "practice-1",
+      expected_side: "right",
+    },
+    {
+      asset_key: "practice-probe-2",
+      relative_path: "assets/population-a/practice_probe/practice-probe-2.png",
+      population_slug: "population-a",
+      asset_role: "practice_probe",
+      display_label: "Practice Probe 2",
+      trial_set_id: "practice-1",
+      expected_side: "left",
+    },
+    {
+      asset_key: "practice-probe-3",
+      relative_path: "assets/population-a/practice_probe/practice-probe-3.png",
+      population_slug: "population-a",
+      asset_role: "practice_probe",
+      display_label: "Practice Probe 3",
+      trial_set_id: "practice-1",
+      expected_side: "right",
+    },
+    {
+      asset_key: "practice-probe-4",
+      relative_path: "assets/population-a/practice_probe/practice-probe-4.png",
+      population_slug: "population-a",
+      asset_role: "practice_probe",
+      display_label: "Practice Probe 4",
+      trial_set_id: "practice-1",
+      expected_side: "left",
+    },
+    {
+      asset_key: "matching-target-1",
+      relative_path: "assets/population-b/matching_target/matching-target-1.png",
+      population_slug: "population-b",
+      asset_role: "matching_target",
+      display_label: "Matching Target",
+      trial_set_id: "matching-1",
+    },
+    {
+      asset_key: "matching-probe-1",
+      relative_path: "assets/population-b/matching_probe/matching-probe-1.png",
+      population_slug: "population-b",
+      asset_role: "matching_probe",
+      display_label: "Matching Probe 1",
+      trial_set_id: "matching-1",
+      expected_side: "left",
+    },
+    {
+      asset_key: "matching-probe-2",
+      relative_path: "assets/population-b/matching_probe/matching-probe-2.png",
+      population_slug: "population-b",
+      asset_role: "matching_probe",
+      display_label: "Matching Probe 2",
+      trial_set_id: "matching-1",
+      expected_side: "right",
+    },
+    {
+      asset_key: "matching-probe-3",
+      relative_path: "assets/population-b/matching_probe/matching-probe-3.png",
+      population_slug: "population-b",
+      asset_role: "matching_probe",
+      display_label: "Matching Probe 3",
+      trial_set_id: "matching-1",
+      expected_side: "left",
+    },
+    {
+      asset_key: "matching-probe-4",
+      relative_path: "assets/population-b/matching_probe/matching-probe-4.png",
+      population_slug: "population-b",
+      asset_role: "matching_probe",
+      display_label: "Matching Probe 4",
+      trial_set_id: "matching-1",
+      expected_side: "right",
+    },
+  ]);
+  assert.equal(importBody.summary.created, 16);
 
   await saveRules(server, version.id, [
     { phase: "study", population_id: popA.id, count: 1, filters: {} },
@@ -433,6 +546,86 @@ test("published face-test study can start runs, record data, and export reports"
     assert.equal(counts.forms, 2);
     assert.equal(counts.memory, 4);
     assert.equal(counts.matching, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("bulk import validates rows and skips existing asset keys", async () => {
+  const server = await startServer();
+  try {
+    const study = await createStudy(server, "Bulk Import Study");
+    await createPopulation(server, study.id, "Population A", "population-a");
+
+    let result = await multipart(server, "/api/facetest/admin/imports/assets", {
+      fields: { study_id: study.id },
+      file: {
+        fieldName: "archive",
+        fileName: "invalid.zip",
+        buffer: createAssetImportZip([
+          {
+            asset_key: "dup-asset",
+            relative_path: "assets/population-a/study/a.png",
+            population_slug: "population-a",
+            asset_role: "study",
+            display_label: "A",
+            identity_id: "identity-a",
+          },
+          {
+            asset_key: "dup-asset",
+            relative_path: "assets/population-a/study/b.png",
+            population_slug: "population-a",
+            asset_role: "study",
+            display_label: "B",
+            identity_id: "identity-b",
+          },
+        ]),
+      },
+    });
+    assert.equal(result.response.status, 422);
+    assert.match(result.json.validationErrors.join("\n"), /duplicated inside this zip/);
+
+    result = await bulkImportAssets(server, study.id, [
+      {
+        asset_key: "stable-study-1",
+        relative_path: "assets/population-a/study/stable-study-1.png",
+        population_slug: "population-a",
+        asset_role: "study",
+        display_label: "Stable Study 1",
+        identity_id: "identity-stable-1",
+      },
+    ]);
+    assert.equal(result.summary.created, 1);
+    assert.equal(result.summary.skipped, 0);
+
+    result = await bulkImportAssets(server, study.id, [
+      {
+        asset_key: "stable-study-1",
+        relative_path: "assets/population-a/study/stable-study-1-repeat.png",
+        population_slug: "population-a",
+        asset_role: "study",
+        display_label: "Stable Study 1 Repeat",
+        identity_id: "identity-stable-1",
+      },
+    ]);
+    assert.equal(result.summary.created, 0);
+    assert.equal(result.summary.skipped, 1);
+    assert.equal(result.results[0].status, "skipped");
+
+    const counts = {
+      assets: server.app.locals.db.prepare("SELECT COUNT(*) AS count FROM facetest_assets WHERE study_id = ?").get(study.id).count,
+      keyed: server.app.locals.db.prepare("SELECT asset_key FROM facetest_assets WHERE study_id = ? LIMIT 1").get(study.id).asset_key,
+    };
+    assert.equal(counts.assets, 1);
+    assert.equal(counts.keyed, "stable-study-1");
+
+    const maintenance = await uploadAsset(server, study.id, null, {
+      display_label: "Single Upload",
+      asset_role: "memory_new",
+      identity_id: "maintenance-new-1",
+      metadata: { source: "manual-fix" },
+    });
+    assert.ok(maintenance.asset_key);
   } finally {
     await server.close();
   }
