@@ -15,6 +15,7 @@ export async function createApp(options = {}) {
 
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
+  app.locals.db = db;
   app.use(express.json({ limit: "10mb" }));
 
   app.use((req, res, next) => {
